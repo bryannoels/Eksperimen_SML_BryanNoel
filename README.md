@@ -1,175 +1,281 @@
-# BigOracle: Worst-Case Time Complexity Prediction
+# BigOracle — Static Worst-Case Time Complexity Prediction
 
-![Preprocess Dataset](https://github.com/<username>/Eksperimen_SML_BryanNoel/actions/workflows/preprocess.yml/badge.svg)
+**BigOracle** is a machine learning project exploring the prediction of worst-case time complexity from source code using static structural features—without executing the program.
 
-Static prediction of a code snippet's worst-case time complexity (7 classes) from structural features extracted from its AST, without executing the code. This repository contains the **experimentation and data-preprocessing stage**: exploratory analysis, feature extraction, an automated preprocessing script, and a CI workflow that regenerates the training dataset on every trigger.
+This repository establishes the project's **data engineering and preprocessing foundation**, including exploratory data analysis (EDA), AST-based feature extraction, a reproducible preprocessing pipeline, and automated dataset generation through GitHub Actions.
 
-```
-codecomplex_raw/*.jsonl
-   -> standardize -> AST feature extraction (tree-sitter) -> clean -> grouped split
-   -> impute + winsorize -> scale -> preprocessing/codecomplex_preprocessing/{train,test}.csv
+> **Project status:** Data preparation and preprocessing are implemented. Model training, experiment tracking, and deployment are planned next. Predictive performance has not yet been evaluated.
+
+## Project Overview
+
+| Component              | Description                                                         |
+| ---------------------- | ------------------------------------------------------------------- |
+| Prediction task        | 7-class worst-case time complexity classification                   |
+| Input languages        | Java and Python                                                     |
+| Dataset                | 9,800 CodeComplex samples across 300 programming problems           |
+| Feature representation | 23 AST-derived and lexical features                                 |
+| Parsing engine         | Tree-sitter                                                         |
+| Data splitting         | Stratified, problem-grouped train/test split                        |
+| Reproducibility        | Automated preprocessing, persisted transformation artifacts, and CI |
+
+## Pipeline Architecture
+
+The pipeline transforms raw source-code records into model-ready features. Solutions from the same programming problem are kept within the same data split to reduce evaluation leakage.
+
+```mermaid
+flowchart TD
+    A["Raw CodeComplex JSONL<br/>Java + Python"] --> B["Load & standardize"]
+    B --> C["AST feature extraction<br/>Tree-sitter + lexical indicators"]
+    C --> D["Data quality checks<br/>Missing values, conflicting labels, duplicates"]
+    D --> E["Ordinal target encoding<br/>7 complexity classes"]
+    E --> F["StratifiedGroupKFold<br/>Grouped by problem"]
+    F --> G["Training subset"]
+    F --> H["Test subset"]
+    G --> I["Fit median imputation<br/>and P1–P99 clipping"]
+    I --> J["Fit StandardScaler<br/>14 count features"]
+    J --> K["Transform training subset"]
+    I -. "Reuse fitted parameters" .-> L["Transform test subset"]
+    J -. "Reuse fitted scaler" .-> L
+    K --> M["train.csv"]
+    L --> N["test.csv"]
+    M --> O["Persist preprocessing artifacts"]
+    N --> O
+    O --> P["scaler.joblib<br/>preprocessing_meta.json"]
 ```
 
 ## Dataset
 
-[CodeComplex](https://github.com/sybaik1/CodeComplex) ([paper](https://arxiv.org/abs/2401.08719)): Codeforces solutions annotated with worst-case time complexity.
+BigOracle uses [CodeComplex](https://github.com/sybaik1/CodeComplex), a dataset of Codeforces solutions annotated with worst-case time complexity. See the [original paper](https://arxiv.org/abs/2401.08719) for details.
 
-| Property | Value |
-|---|---|
-| Languages | Java (4,900), Python (4,900) |
-| Samples | 9,800 |
-| Unique problems | 300 (258 Java, 277 Python, 235 shared) |
-| Raw fields | `src`, `complexity`, `problem`, `from`, `tags` |
-| Raw labels | `constant`, `logn`, `linear`, `nlogn`, `quadratic`, `cubic`, `np` |
+| Property        | Value                                                             |
+| --------------- | ----------------------------------------------------------------- |
+| Languages       | Java (4,900), Python (4,900)                                      |
+| Raw samples     | 9,800                                                             |
+| Unique problems | 300 (258 represented in Java, 277 in Python, 235 shared)          |
+| Raw fields      | `src`, `complexity`, `problem`, `from`, `tags`                    |
+| Original labels | `constant`, `logn`, `linear`, `nlogn`, `quadratic`, `cubic`, `np` |
 
-Labels are mapped to an ordered 7-class target:
+### Target Classes
 
-| id | class | id | class |
-|---|---|---|---|
-| 0 | O(1) | 4 | O(n^2) |
-| 1 | O(log n) | 5 | O(n^3) |
-| 2 | O(n) | 6 | NP-hard / exponential |
-| 3 | O(n log n) | | |
+The original labels are mapped to an ordered 7-class target:
 
-Raw files are stored unmodified in `codecomplex_raw/`. Refer to the upstream repository for license and citation terms.
+| Class ID | Complexity | Class ID | Complexity            |
+| -------: | ---------- | -------: | --------------------- |
+|        0 | O(1)       |        4 | O(n²)                 |
+|        1 | O(log n)   |        5 | O(n³)                 |
+|        2 | O(n)       |        6 | NP-hard / exponential |
+|        3 | O(n log n) |          |                       |
 
-## Repository Structure
+Raw dataset files are retained unmodified in `codecomplex_raw/`. Refer to the upstream repository for licensing and citation requirements.
 
-```
-Eksperimen_SML_BryanNoel/
-├── .github/workflows/preprocess.yml     # CI workflow (executed by GitHub Actions)
-├── .workflow/preprocess.yml             # copy of the workflow, kept for the required layout
-├── codecomplex_raw/                     # raw dataset (java_data.jsonl, python_data.jsonl)
-└── preprocessing/
-    ├── Eksperimen_BryanNoel.ipynb       # manual experiment: loading, EDA, preprocessing
-    ├── automate_BryanNoel.py            # automated preprocessing (same steps as the notebook)
-    ├── requirements.txt
-    └── codecomplex_preprocessing/       # output: train.csv, test.csv, scaler.joblib, preprocessing_meta.json
-```
+## Static Feature Engineering
 
-## Feature Set
+Each code snippet is parsed using [Tree-sitter](https://tree-sitter.github.io/) with Java and Python grammars. A single AST traversal extracts **23 model features**, supplemented by regex-based indicators of common algorithmic patterns.
 
-Each snippet is parsed with [tree-sitter](https://tree-sitter.github.io/) (Java and Python grammars) and reduced to 23 model features in a single AST traversal, plus regex-based algorithmic-pattern flags.
+| Feature group                  | Features                                                                                                     |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| Code size                      | `loc`, `n_chars`, `ast_nodes`, `ast_depth`                                                                   |
+| Loops                          | `loop_count`, `for_count`, `while_count`, `comprehension_count`, `max_loop_depth`                            |
+| Branching                      | `branch_count`, `max_nesting_depth`                                                                          |
+| Functions and recursion        | `func_count`, `call_count`, `max_recursive_calls`, `has_recursion`                                           |
+| Algorithmic pattern indicators | `has_sort`, `has_halving`, `has_doubling`, `has_binary_search`, `has_heap`, `has_hash_container`, `has_memo` |
+| Metadata                       | `is_java`                                                                                                    |
 
-| Group | Features |
-|---|---|
-| Size | `loc`, `n_chars`, `ast_nodes`, `ast_depth` |
-| Loops | `loop_count`, `for_count`, `while_count`, `comprehension_count`, `max_loop_depth` |
-| Branching | `branch_count`, `max_nesting_depth` |
-| Functions / recursion | `func_count`, `call_count`, `max_recursive_calls`, `has_recursion` |
-| Algorithmic patterns (lexical) | `has_sort`, `has_halving`, `has_doubling`, `has_binary_search`, `has_heap`, `has_hash_container`, `has_memo` |
-| Meta | `is_java` |
+`parse_error` is calculated for auditing and data-quality analysis, but is excluded from the model feature set.
 
-`parse_error` is computed for audit purposes only and is not a model feature. Python comprehensions count as loops, and `else if` chains do not inflate nesting depth.
+Language-specific handling includes:
 
-## Preprocessing Pipeline
+- Python comprehensions are counted as loops.
+- `else if` chains are handled without artificially increasing nesting depth.
 
-The notebook (`Eksperimen_BryanNoel.ipynb`) is the exploratory reference; `automate_BryanNoel.py` is its function-level conversion with an identical step order. Both produce byte-identical `train.csv`, `test.csv`, `scaler.joblib` and `preprocessing_meta.json`.
+### Why Static Analysis?
 
-| Step | Operation | Detail |
-|---|---|---|
-| 1 | Load and standardize | Auto-detects code, label, language and problem columns; maps labels to the 7 classes |
-| 2 | Feature extraction | 24 columns per sample (23 features + `parse_error`) |
-| 3 | Missing values | Drops empty code or missing labels |
-| 4 | Duplicates and conflicts | Drops groups of whitespace-normalized identical code that have conflicting labels, then deduplicates |
-| 5 | Target encoding | Ordinal by complexity, not alphabetical |
-| 6 | Split | `StratifiedGroupKFold(5, shuffle=True, seed=42)`, first fold as test, grouped by `problem` |
-| 7 | Impute + winsorize | Median imputation and P1-P99 clipping, fitted on train only |
-| 8 | Scale | `StandardScaler` on the 14 count features, fitted on train only |
+AST-based features provide a lightweight, execution-free representation of source code. They capture structural signals such as loop depth, nesting, recursion, and algorithmic constructs.
 
-**Design decisions**
+However, AST structure alone cannot fully represent variable dependencies, loop-bound semantics, or problem-specific input constraints. These limitations motivate further investigation into feature engineering and model design.
 
-- **Grouped split.** The 9,800 samples come from only 300 problems (about 33 solutions per problem). A random row-level split places solutions to the same problem in both train and test, which inflates test scores. The split is therefore grouped by `problem`, and the pipeline asserts that no problem appears on both sides.
-- **No leakage from statistics.** Medians, clipping bounds and scaler parameters are learned from the training set only and saved to `preprocessing_meta.json` and `scaler.joblib` so they can be re-applied at inference time.
-- **Percentile clipping instead of IQR.** Count features are dominated by small values and zeros, which makes the IQR frequently zero and flags most positive values as outliers.
+## Data Preprocessing
 
-**Reference run**
+The exploratory notebook, `Eksperimen_BryanNoel.ipynb`, serves as the reference experiment. `automate_BryanNoel.py` implements the same operations in an automated pipeline.
 
-| Stage | Samples |
-|---|---|
-| Raw | 9,800 |
-| Removed: conflicting labels | 133 |
-| Removed: exact duplicates | 283 |
-| After cleaning | 9,384 |
-| Train | 7,462 (246 problems) |
-| Test | 1,922 (54 problems) |
+Both are designed to produce byte-identical `train.csv`, `test.csv`, `scaler.joblib`, and `preprocessing_meta.json` artifacts.
+
+| Step | Operation                        | Details                                                                                          |
+| ---: | -------------------------------- | ------------------------------------------------------------------------------------------------ |
+|    1 | Load and standardize             | Automatically identify source, label, language, and problem columns; map labels to seven classes |
+|    2 | Extract features                 | 24 columns per sample: 23 model features + `parse_error`                                         |
+|    3 | Handle missing data              | Remove empty source snippets and missing labels                                                  |
+|    4 | Resolve duplicates and conflicts | Remove groups of whitespace-normalized identical code with conflicting labels, then deduplicate  |
+|    5 | Encode target                    | Preserve complexity ordering rather than alphabetical ordering                                   |
+|    6 | Split dataset                    | `StratifiedGroupKFold(5, shuffle=True, seed=42)`; first fold used as test, grouped by `problem`  |
+|    7 | Impute and clip                  | Median imputation and P1–P99 clipping, fitted on training data only                              |
+|    8 | Scale features                   | Fit `StandardScaler` on 14 count features using training data only                               |
+
+### Engineering Decisions
+
+**1. Problem-grouped splitting to reduce data leakage**
+
+The 9,800 samples originate from only 300 problems—approximately 33 solutions per problem. A random row-level split could place solutions to the same problem in both training and test sets, allowing problem-specific patterns to inflate evaluation scores.
+
+The pipeline therefore groups samples by `problem` and asserts that no problem appears in both subsets.
+
+**2. Train-only fitting for preprocessing**
+
+Imputation medians, clipping thresholds, and scaling parameters are learned exclusively from the training subset. Persisting these parameters enables consistent transformations during inference while preventing test-set statistics from leaking into training.
+
+**3. Percentile clipping instead of IQR-based outlier detection**
+
+Count features are concentrated around small values and zero. This often results in an interquartile range (IQR) of zero, causing many positive observations to be flagged as outliers. P1–P99 clipping provides a more practical alternative for this feature distribution.
+
+## Reference Results
+
+| Stage                       |              Samples |
+| --------------------------- | -------------------: |
+| Raw dataset                 |                9,800 |
+| Removed: conflicting labels |                  133 |
+| Removed: exact duplicates   |                  283 |
+| After cleaning              |                9,384 |
+| Training set                | 7,462 (246 problems) |
+| Test set                    |  1,922 (54 problems) |
 
 Exact split sizes may vary slightly across scikit-learn versions.
 
+> **Evaluation caveat:** The held-out test set contains only 54 problems. Performance estimates from a single split may have substantial variance; grouped cross-validation is recommended for final evaluation.
+
+## Repository Structure
+
+```text
+Eksperimen_SML_BryanNoel/
+├── .github/
+│   └── workflows/
+│       └── preprocess.yml          # GitHub Actions preprocessing workflow
+├── .workflow/
+│   └── preprocess.yml              # Workflow copy retained for required layout
+├── codecomplex_raw/
+│   ├── java_data.jsonl             # Raw Java samples
+│   └── python_data.jsonl            # Raw Python samples
+└── preprocessing/
+    ├── Eksperimen_BryanNoel.ipynb  # Exploratory experiment and reference pipeline
+    ├── automate_BryanNoel.py       # Automated preprocessing entry point
+    ├── requirements.txt
+    └── codecomplex_preprocessing/
+        ├── train.csv
+        ├── test.csv
+        ├── scaler.joblib
+        └── preprocessing_meta.json
+```
+
 ## Quick Start
 
-Requires Python 3.10+ (CI uses 3.12).
+**Requirements:** Python 3.10 or later. The CI workflow uses Python 3.12.
+
+### 1. Set up the environment
+
+Run from the repository root:
 
 ```bash
-# from the repository root
 python3 -m venv .venv
-source .venv/bin/activate              # Windows: .venv\Scripts\activate
+source .venv/bin/activate
+# Windows: .venv\Scripts\activate
+
 pip install -r preprocessing/requirements.txt
 ```
 
-**Run the automated preprocessing**
+### 2. Run preprocessing
 
 ```bash
 python preprocessing/automate_BryanNoel.py
-# or with explicit paths
-python preprocessing/automate_BryanNoel.py --raw codecomplex_raw --out preprocessing/codecomplex_preprocessing --seed 42
 ```
 
-| Argument | Default | Description |
-|---|---|---|
-| `--raw` | `../codecomplex_raw` (relative to the script) | Raw data directory |
-| `--out` | `./codecomplex_preprocessing` (relative to the script) | Output directory |
-| `--seed` | `42` | Seed for the grouped split |
+Or specify input/output paths and a seed:
 
-**Use as a module**
+```bash
+python preprocessing/automate_BryanNoel.py \
+    --raw codecomplex_raw \
+    --out preprocessing/codecomplex_preprocessing \
+    --seed 42
+```
+
+| Argument | Default                                                | Description                       |
+| -------- | ------------------------------------------------------ | --------------------------------- |
+| `--raw`  | `../codecomplex_raw` (relative to the script)          | Raw dataset directory             |
+| `--out`  | `./codecomplex_preprocessing` (relative to the script) | Output directory                  |
+| `--seed` | `42`                                                   | Random seed for grouped splitting |
+
+### 3. Use the pipeline as a module
 
 ```python
 from automate_BryanNoel import preprocess
 
-X_train, X_test, y_train, y_test = preprocess(raw_dir, out_dir)   # scaled features, class ids 0-6
+X_train, X_test, y_train, y_test = preprocess(
+    raw_dir,
+    out_dir
+)
+# X: preprocessed features; y: class IDs 0–6
 ```
 
-**Run the notebook.** Open `preprocessing/Eksperimen_BryanNoel.ipynb`, select the `.venv` kernel, and run all cells from the `preprocessing/` directory.
+### 4. Run the experiment notebook
 
-**Outputs** (`preprocessing/codecomplex_preprocessing/`)
+Open `preprocessing/Eksperimen_BryanNoel.ipynb`, select the `.venv` kernel, and run all cells from the `preprocessing/` directory.
 
-| File | Content |
-|---|---|
-| `train.csv`, `test.csv` | 23 scaled features + `target` |
-| `scaler.joblib` | Fitted `StandardScaler` for the count features |
-| `preprocessing_meta.json` | Feature order, class mapping, imputation medians, clipping bounds, split scheme |
+### Generated Artifacts
 
-## CI: GitHub Actions
+Outputs are written to `preprocessing/codecomplex_preprocessing/`.
 
-`.github/workflows/preprocess.yml` regenerates the dataset automatically.
+| Artifact                  | Description                                                                                |
+| ------------------------- | ------------------------------------------------------------------------------------------ |
+| `train.csv`, `test.csv`   | 23 transformed model features + `target`                                                   |
+| `scaler.joblib`           | Fitted `StandardScaler` for count features                                                 |
+| `preprocessing_meta.json` | Feature order, class mapping, imputation medians, clipping bounds, and split configuration |
 
-| Item | Value |
-|---|---|
-| Triggers | `push` to `main` touching `codecomplex_raw/`, `automate_BryanNoel.py`, `requirements.txt` or the workflow; manual `workflow_dispatch` |
-| Runner | `ubuntu-latest`, Python 3.12, pip cache |
-| Steps | checkout, install dependencies, run `automate_BryanNoel.py`, upload artifact, commit changed dataset |
-| Output | artifact `codecomplex_preprocessing` and, when the data changed, a bot commit to `preprocessing/codecomplex_preprocessing/` |
+## Continuous Integration
 
-The workflow needs `contents: write`. If the commit step fails with a 403, enable **Settings → Actions → General → Workflow permissions → Read and write**.
+GitHub Actions automates dataset regeneration through `.github/workflows/preprocess.yml`.
+
+```mermaid
+flowchart LR
+    A["Push to main<br/>relevant files changed"] --> C["GitHub Actions"]
+    B["Manual workflow_dispatch"] --> C
+    C --> D["Checkout repository"]
+    D --> E["Set up Python 3.12<br/>install dependencies"]
+    E --> F["Run preprocessing script"]
+    F --> G["Upload dataset artifact"]
+    F --> H{"Generated files changed?"}
+    H -- Yes --> I["Commit processed dataset<br/>using workflow bot"]
+    H -- No --> J["Finish"]
+    I --> J
+```
+
+| Configuration | Value                                                                                                                                  |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Triggers      | Push to `main` affecting `codecomplex_raw/`, the preprocessing script, `requirements.txt`, or the workflow; manual `workflow_dispatch` |
+| Runner        | `ubuntu-latest`, Python 3.12, pip cache                                                                                                |
+| Steps         | Checkout, install dependencies, run preprocessing, upload artifact, commit changed outputs                                             |
+| Outputs       | `codecomplex_preprocessing` artifact and—if generated data changes—a bot commit to `preprocessing/codecomplex_preprocessing/`          |
+
+The workflow requires `contents: write`. If the commit step fails with HTTP 403, check **Settings → Actions → General → Workflow permissions** and enable **Read and write permissions**.
 
 ## Limitations
 
-- Algorithmic-pattern flags are lexical (regular expressions) and can produce false positives, for example `/ 2` unrelated to binary search.
-- Structural features do not capture data dependencies between variables or the semantics of loop bounds, so classes that depend on input constraints can remain hard to separate.
-- CodeComplex labels follow an annotation convention based on the problem's input variables, which is not fully recoverable from code structure alone.
-- The grouped test set contains 54 problems, so single-split scores have high variance. Grouped cross-validation is preferable for final evaluation.
+- Algorithmic-pattern indicators are lexical regex features and may produce false positives (for example, `/ 2` may be unrelated to binary search).
+- Structural features do not capture variable dependencies or loop-bound semantics, limiting separation of classes that depend on input constraints.
+- CodeComplex labels follow an annotation convention based on each problem's input variables; this information cannot always be recovered from source structure alone.
+- The grouped test split contains 54 problems, so single-split estimates may be unstable. Grouped cross-validation is preferable for final evaluation.
 
 ## Roadmap
 
-- [x] Experiment notebook: loading, EDA, preprocessing
+- [x] Exploratory notebook: data loading, EDA, and preprocessing
 - [x] Automated preprocessing script
-- [x] GitHub Actions workflow producing the processed dataset
-- [ ] Model training with MLflow tracking (local, then DagsHub), hyperparameter tuning
-- [ ] CI retraining with MLflow Project and Docker image publishing
-- [ ] Serving with Prometheus and Grafana monitoring and alerting
-- [ ] C++ feature extractor with parity tests and benchmark against the Python reference
+- [x] GitHub Actions workflow for processed dataset generation
+- [ ] Train classification models and track experiments with MLflow (local, then DagsHub)
+- [ ] Hyperparameter tuning
+- [ ] CI retraining with MLflow Projects and Docker image publishing
+- [ ] Model serving, monitoring, and alerting with Prometheus and Grafana
+- [ ] C++ feature extractor with parity tests and benchmarks against the Python reference
 
-## Citation
+## Dataset Citation
+
+If you use CodeComplex, cite the original dataset paper:
 
 ```bibtex
 @misc{baik2024codecomplex,
@@ -182,3 +288,7 @@ The workflow needs `contents: write`. If the commit step fails with a 403, enabl
   url           = {https://arxiv.org/abs/2401.08719}
 }
 ```
+
+---
+
+_BigOracle currently focuses on building a reproducible data foundation for static complexity prediction. Model development and empirical evaluation are future milestones._
