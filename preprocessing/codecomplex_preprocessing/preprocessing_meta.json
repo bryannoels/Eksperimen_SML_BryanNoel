@@ -120,5 +120,8 @@
     "max_recursive_calls": 4.0
   },
   "n_train": 7462,
-  "n_test": 1922
+  "n_test": 1922,
+  "n_train_groups": 246,
+  "n_test_groups": 54,
+  "train_groups_file": "train_groups.csv"
 }

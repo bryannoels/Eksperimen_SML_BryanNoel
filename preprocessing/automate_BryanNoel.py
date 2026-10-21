@@ -12,11 +12,13 @@ tahapan dan urutannya identik, hanya strukturnya dipecah menjadi fungsi.
     4. split_data               : pembagian latih/uji per soal (StratifiedGroupKFold)
     5. impute_and_clip          : imputasi median dan winsorization P1-P99 (statistik dari data latih)
     6. scale_features           : StandardScaler (dipelajari dari data latih)
-    7. save_outputs             : simpan train.csv, test.csv, scaler.joblib, preprocessing_meta.json
+    7. save_outputs             : simpan train.csv, test.csv, train_groups.csv,
+                                   scaler.joblib, preprocessing_meta.json
 
-Penggunaan (CLI):
+Penggunaan (CLI), dari akar proyek Membangun_model/:
     python preprocessing/automate_BryanNoel.py
-    python preprocessing/automate_BryanNoel.py --raw codecomplex_raw --out preprocessing/codecomplex_preprocessing
+    # Keluaran default: ./codecomplex_preprocessing/ (langsung untuk modelling_tuning.py)
+    python preprocessing/automate_BryanNoel.py --raw codecomplex_raw --out codecomplex_preprocessing
 
 Penggunaan (sebagai modul):
     from automate_BryanNoel import preprocess
@@ -45,7 +47,8 @@ SEED = 42
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_RAW_DIR = SCRIPT_DIR.parent / "codecomplex_raw"
-DEFAULT_OUT_DIR = SCRIPT_DIR / "codecomplex_preprocessing"
+# Simpan di akar Membangun_model/ agar langsung cocok dengan modelling_tuning.py.
+DEFAULT_OUT_DIR = SCRIPT_DIR.parent / "codecomplex_preprocessing"
 
 CODE_COLS = ["src", "code", "source", "source_code", "content"]
 LABEL_COLS = ["complexity", "label", "time_complexity", "target"]
@@ -410,7 +413,7 @@ def scale_features(X_train, X_test):
 # ---------------------------------------------------------------------------
 # 7. Penyimpanan dan verifikasi (notebook 5.7 - 5.8)
 # ---------------------------------------------------------------------------
-def save_outputs(out_dir, X_train_s, X_test_s, y_train, y_test, scaler,
+def save_outputs(out_dir, X_train_s, X_test_s, y_train, y_test, g_train, g_test, scaler,
                  label2id, medians, clip_lower, clip_upper, seed=SEED):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -420,8 +423,17 @@ def save_outputs(out_dir, X_train_s, X_test_s, y_train, y_test, scaler,
     test_out = X_test_s.copy()
     test_out["target"] = y_test.values
 
+    # IDs kelompok harus berurutan persis sama dengan baris pada train.csv.
+    if len(g_train) != len(train_out) or len(g_test) != len(test_out):
+        raise ValueError("Jumlah group ID tidak sesuai dengan jumlah baris data latih/uji.")
+    overlap = set(g_train.astype(str)) & set(g_test.astype(str))
+    if overlap:
+        raise ValueError(f"Kebocoran kelompok: {len(overlap)} soal muncul di latih dan uji.")
+
+    groups_out = pd.DataFrame({"problem": g_train.astype(str).to_numpy()})
     train_out.to_csv(out_dir / "train.csv", index=False)
     test_out.to_csv(out_dir / "test.csv", index=False)
+    groups_out.to_csv(out_dir / "train_groups.csv", index=False)
     joblib.dump(scaler, out_dir / "scaler.joblib")
 
     meta = {
@@ -437,6 +449,9 @@ def save_outputs(out_dir, X_train_s, X_test_s, y_train, y_test, scaler,
         "clip_upper": clip_upper.to_dict(),
         "n_train": int(len(train_out)),
         "n_test": int(len(test_out)),
+        "n_train_groups": int(g_train.nunique()),
+        "n_test_groups": int(g_test.nunique()),
+        "train_groups_file": "train_groups.csv",
     }
     with open(out_dir / "preprocessing_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
@@ -444,9 +459,14 @@ def save_outputs(out_dir, X_train_s, X_test_s, y_train, y_test, scaler,
     # verifikasi integritas
     train_chk = pd.read_csv(out_dir / "train.csv")
     test_chk = pd.read_csv(out_dir / "test.csv")
+    groups_chk = pd.read_csv(out_dir / "train_groups.csv")
     assert train_chk.isna().sum().sum() == 0 and test_chk.isna().sum().sum() == 0, "Masih ada nilai kosong"
     assert list(train_chk.columns) == FEATURES + ["target"], "Urutan kolom latih tidak sesuai"
     assert list(test_chk.columns) == FEATURES + ["target"], "Urutan kolom uji tidak sesuai"
+    assert list(groups_chk.columns) == ["problem"], "Kolom train_groups.csv harus bernama 'problem'"
+    assert len(groups_chk) == len(train_chk), "Jumlah group ID tidak sama dengan baris train.csv"
+    assert groups_chk["problem"].notna().all(), "train_groups.csv berisi group ID kosong"
+    assert groups_chk["problem"].tolist() == g_train.astype(str).tolist(), "Urutan group ID tidak selaras dengan train.csv"
     return train_out, test_out
 
 
@@ -487,8 +507,9 @@ def preprocess(raw_dir=DEFAULT_RAW_DIR, out_dir=DEFAULT_OUT_DIR, seed=SEED, verb
     X_train_s, X_test_s, scaler = scale_features(X_train, X_test)
 
     log(f"[7/7] Menyimpan keluaran ke {Path(out_dir).resolve()}")
-    save_outputs(out_dir, X_train_s, X_test_s, y_train, y_test, scaler,
+    save_outputs(out_dir, X_train_s, X_test_s, y_train, y_test, g_train, g_test, scaler,
                  label2id, medians, clip_lower, clip_upper, seed)
+    log(f"      train_groups.csv: {len(g_train):,} ID untuk {g_train.nunique():,} soal latih")
 
     log(f"Selesai dalam {time.time() - t0:.1f} detik.")
     return X_train_s, X_test_s, y_train, y_test
@@ -497,7 +518,8 @@ def preprocess(raw_dir=DEFAULT_RAW_DIR, out_dir=DEFAULT_OUT_DIR, seed=SEED, verb
 def parse_args():
     p = argparse.ArgumentParser(description="Preprocessing otomatis dataset CodeComplex.")
     p.add_argument("--raw", default=str(DEFAULT_RAW_DIR), help="Folder data mentah (default: ../codecomplex_raw)")
-    p.add_argument("--out", default=str(DEFAULT_OUT_DIR), help="Folder keluaran (default: ./codecomplex_preprocessing)")
+    p.add_argument("--out", default=str(DEFAULT_OUT_DIR),
+                   help="Folder keluaran (default: ../codecomplex_preprocessing dari folder preprocessing/)")
     p.add_argument("--seed", type=int, default=SEED, help="Seed pembagian data (default: 42)")
     return p.parse_args()
 
